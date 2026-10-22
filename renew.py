@@ -1,4 +1,4 @@
-# renew.py - DigitalPlat 多账号纯 API 自动续期与精准邮箱标识版
+# renew.py - DigitalPlat 多账号纯 API 自动续期与错误捕获推送版
 
 import os
 import sys
@@ -31,17 +31,8 @@ WX_PUSH_TOKEN = os.getenv("WX_PUSH_TOKEN")
 
 API_BASE_URL = "https://domain-api.digitalplat.org/api/v1"
 
-def validate_config():
-    """验证必需的环境变量是否已设置"""
-    if not DP_API_KEYS:
-        logger.error("错误：缺少必需的环境变量 DP_API_KEY。请在 GitHub Secrets 中配置。")
-        sys.exit(1)
-    if not DP_ACCOUNT_EMAILS:
-        logger.error("错误：缺少必需的环境变量 DP_ACCOUNT_EMAILS。请配置对应的邮箱。")
-        sys.exit(1)
-
 def send_notifications(title, content):
-    """同时推送通知到 Telegram 和 自定义微信"""
+    """同时推送通知到 Telegram 和 自定义微信（带错误兜底）"""
     # 1. 发送 Telegram 通知
     if TG_BOT_TOKEN and TG_CHAT_ID:
         try:
@@ -120,17 +111,15 @@ def fetch_domains(api_key):
     try:
         response = requests.get(url, headers=get_headers(api_key), timeout=30)
         if response.status_code != 200:
-            logger.error(f"获取域名列表失败，状态码: {response.status_code}, 响应: {response.text}")
-            return []
+            return None, f"获取域名列表失败，状态码: {response.status_code}, 响应: {response.text}"
         
         data = response.json()
         domains = data.get("data", [])
         if isinstance(domains, dict):
             domains = domains.get("domains", [])
-        return domains
+        return domains, None
     except Exception as e:
-        logger.error(f"获取域名列表异常: {e}")
-        return []
+        return None, f"获取域名列表异常: {str(e)}"
 
 def renew_domain(api_key, domain_identifier):
     """通过 API 续期指定域名"""
@@ -160,10 +149,14 @@ def process_account(api_key, email, index):
     account_label = f"{index}. {email}"
     logger.info(f"\n--- 开始处理账号: {account_label} ---")
     
-    domains = fetch_domains(api_key)
+    domains, err = fetch_domains(api_key)
+    if err:
+        logger.error(f"账号 {account_label} 出错: {err}")
+        return f"【账号: {account_label}】\n❌ 账号连接/鉴权失败: {err}"
+    
     if not domains:
         logger.info(f"账号 {account_label} 未找到任何域名或获取列表为空。")
-        return f"【账号: {account_label}】\n⚠️ 未找到有效域名或 API Key 无效"
+        return f"【账号: {account_label}】\n⚠️ 未找到有效域名"
 
     report_lines = [f"【账号: {account_label}】"]
     
@@ -178,13 +171,11 @@ def process_account(api_key, email, index):
         
         logger.info(f"检查域名: {name} (到期时间: {expiry_raw}, 剩余天数: {remaining_days})")
 
-        # 判断：如果计算出剩余天数大于 120 天，自动跳过
         if remaining_days is not None and remaining_days > 120:
             logger.info(f"ℹ️ 域名 {name} 距离到期还有 {remaining_days} 天，暂无需续期，已跳过。")
             report_lines.append(f"⚪ {name}: 剩 {remaining_days} 天 (未到期)")
             continue
 
-        # 处于 120 天内，尝试进行续期
         result = renew_domain(api_key, domain_id)
         if result["status"] in [200, 201]:
             logger.info(f"✅ 域名 {name} 续期成功！")
@@ -202,24 +193,38 @@ def process_account(api_key, email, index):
     return "\n".join(report_lines)
 
 def main():
-    validate_config()
-    
-    all_reports = []
-    # 以配置的邮箱列表为基准进行循环
-    for idx, email in enumerate(DP_ACCOUNT_EMAILS, 1):
-        # 智能匹配 API Key：如果 Key 数量和邮箱数量一致则按对应顺序取，如果只配置了 1 个 Key 则所有账号共用该 Key
-        key_index = idx - 1 if idx - 1 < len(DP_API_KEYS) else 0
-        current_api_key = DP_API_KEYS[key_index]
+    try:
+        # 基础校验：如果完全没配 API Key，直接抛出异常并通过微信/TG发送
+        if not DP_API_KEYS:
+            raise ValueError("缺少必需的环境变量 DP_API_KEY，请在 GitHub Secrets 中配置。")
         
-        account_report = process_account(current_api_key, email, idx)
-        all_reports.append(account_report)
+        # 如果没有配 DP_ACCOUNT_EMAILS，但配了 API_KEY，则自动生成默认账号名，不中断
+        account_emails = DP_ACCOUNT_EMAILS
+        if not account_emails:
+            account_emails = [f"account_{i+1}@digitalplat.org" for i in range(len(DP_API_KEYS))]
 
-    final_content = "\n\n".join(all_reports)
-    title = "DigitalPlat 自动续期汇总报告"
-    
-    # 发送通知
-    send_notifications(title, final_content)
-    logger.info("所有账号任务执行完毕。")
+        all_reports = []
+        for idx, email in enumerate(account_emails, 1):
+            # 智能匹配：如果只配了 1 个 Key，所有邮箱共用该 Key；如果配了多个则依次对应
+            key_index = idx - 1 if idx - 1 < len(DP_API_KEYS) else 0
+            current_api_key = DP_API_KEYS[key_index]
+            
+            account_report = process_account(current_api_key, email, idx)
+            all_reports.append(account_report)
+
+        final_content = "\n\n".join(all_reports)
+        title = "DigitalPlat 自动续期汇总报告"
+        
+        # 正常发送推送
+        send_notifications(title, final_content)
+        logger.info("所有账号任务执行完毕。")
+
+    except Exception as e:
+        error_msg = f"脚本运行发生严重错误:\n{str(e)}"
+        logger.error(error_msg)
+        # 即使报错崩溃，也通过 TG 和微信把错误原因发出来
+        send_notifications("DigitalPlat 脚本运行报错告警", error_msg)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
