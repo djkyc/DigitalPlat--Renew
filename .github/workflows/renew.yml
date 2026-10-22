@@ -1,50 +1,32 @@
-name: Domain Renewal
+name: DigitalPlat Auto Renew
 on:
   schedule:
     - cron: '15 1 15 * *'  # 每月15日 北京时间9:15 (UTC 1:15) 运行一次
   workflow_dispatch:  # 允许手动触发
+
+
 jobs:
   renew:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # 使用稳定的 Python 版本
+          python-version: '3.11'
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64
+          pip install requests
 
-      - name: Clear Playwright cache
-        run: |
-          rm -rf /home/runner/.cache/ms-playwright
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade playwright requests
-
-      - name: Install Google Chrome
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          google-chrome --version
-
-      - name: Verify Playwright installation
-        run: |
-          python -m playwright --version
-          python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(channel='chrome'); print('chrome launch OK', b.version); b.close(); p.stop()"
-
-      - name: Run renew script
-        run: python renew.py
+      - name: Run renewal script
         env:
-          DP_EMAIL: ${{ secrets.DP_EMAIL }}
-          DP_PASSWORD: ${{ secrets.DP_PASSWORD }}
-          BARK_KEY: ${{ secrets.BARK_KEY }}
-          BARK_SERVER: ${{ secrets.BARK_SERVER }}
-          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+          DP_API_KEY: ${{ secrets.DP_API_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
+          WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
+        run: |
+          python renew.py
