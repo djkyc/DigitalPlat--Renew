@@ -1,11 +1,11 @@
-# renew.py - DigitalPlat 纯 API 自动续期与多通道通知版
+# renew.py - DigitalPlat 多账号纯 API 自动续期与精准天数提醒版
 
 import os
 import sys
 import json
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 # 配置日志
 logging.basicConfig(
@@ -15,27 +15,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 1. 从环境变量中读取配置 ---
-DP_API_KEY = os.getenv("DP_API_KEY")  # 官方后台生成的 API 密钥 (dp_live_...)
+# 支持多账号，多个 Key 用英文逗号隔开，例如: dp_live_xxx,dp_live_yyy
+DP_API_KEYS_RAW = os.getenv("DP_API_KEY", "")
+DP_API_KEYS = [k.strip() for k in DP_API_KEYS_RAW.split(",") if k.strip()]
 
 # 通知配置：Telegram
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 # 通知配置：自定义微信 / PushPlus
-WX_PUSH_URL = os.getenv("WX_PUSH_URL")          # 自定义微信推送接口地址
-WX_PUSH_TOKEN = os.getenv("WX_PUSH_TOKEN")      # 自定义微信/PushPlus的Token
+WX_PUSH_URL = os.getenv("WX_PUSH_URL")          
+WX_PUSH_TOKEN = os.getenv("WX_PUSH_TOKEN")      
 
-# --- 2. 官方 API 基础地址 ---
 API_BASE_URL = "https://domain-api.digitalplat.org/api/v1"
 
 def validate_config():
     """验证必需的环境变量是否已设置"""
-    if not DP_API_KEY:
-        logger.error("错误：缺少必需的环境变量 DP_API_KEY。请在 GitHub Secrets 中配置。")
+    if not DP_API_KEYS:
+        logger.error("错误：缺少必需的环境变量 DP_API_KEY。请在 GitHub Secrets 中配置（多账号可用逗号分隔）。")
         sys.exit(1)
 
 def send_notifications(title, content):
-    """同时推送通知到 Telegram 和 自定义微信"""
+    """同时推送通知到 Telegram 和 自定义微信（优化摘要预览，解决微信空白问题）"""
     # 1. 发送 Telegram 通知
     if TG_BOT_TOKEN and TG_CHAT_ID:
         try:
@@ -60,12 +61,13 @@ def send_notifications(title, content):
                 "Authorization": f"Bearer {WX_PUSH_TOKEN}",
                 "Content-Type": "application/json"
             }
+            # 将正文同时赋值给 summary 和 description，防止微信预览空白
             payload = {
                 "token": WX_PUSH_TOKEN,
                 "title": title,
                 "text": content,
-                "summary": title,
-                "description": content,
+                "summary": title + "\n" + content[:50] + "...",  # 摘要预览
+                "description": content,                         # 详细描述
                 "content": content
             }
             res = requests.post(WX_PUSH_URL, json=payload, headers=headers, timeout=10)
@@ -76,26 +78,24 @@ def send_notifications(title, content):
         except Exception as e:
             logger.error(f"微信通知异常: {e}")
 
-def get_headers():
+def get_headers(api_key):
     """构建官方 API 请求头"""
     return {
-        "Authorization": f"Bearer {DP_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
 
-def fetch_domains():
+def fetch_domains(api_key):
     """通过 API 获取域名列表"""
     url = f"{API_BASE_URL}/domains"
-    logger.info("正在获取域名列表...")
     try:
-        response = requests.get(url, headers=get_headers(), timeout=30)
+        response = requests.get(url, headers=get_headers(api_key), timeout=30)
         if response.status_code != 200:
             logger.error(f"获取域名列表失败，状态码: {response.status_code}, 响应: {response.text}")
             return []
         
         data = response.json()
-        # 根据官方标准的 envelop 返回格式提取数据
         domains = data.get("data", [])
         if isinstance(domains, dict):
             domains = domains.get("domains", [])
@@ -104,10 +104,10 @@ def fetch_domains():
         logger.error(f"获取域名列表异常: {e}")
         return []
 
-def renew_domain(domain_name):
+def renew_domain(api_key, domain_name):
     """通过 API 续期指定域名"""
     url = f"{API_BASE_URL}/domains/{domain_name}/renew"
-    headers = get_headers()
+    headers = get_headers(api_key)
     headers["Idempotency-Key"] = f"renew-{domain_name}-{int(datetime.now().timestamp())}"
     
     payload = {
@@ -127,77 +127,81 @@ def renew_domain(domain_name):
             "body": str(e)
         }
 
-def save_results(renewed_domains, failed_domains):
-    """保存处理结果到 JSON 文件"""
-    results = {
-        "timestamp": datetime.now().isoformat(),
-        "renewed_count": len(renewed_domains),
-        "failed_count": len(failed_domains),
-        "renewed_domains": renewed_domains,
-        "failed_domains": failed_domains
-    }
+def parse_expiry_days(expiry_str):
+    """解析到期时间字符串并计算剩余天数"""
+    if not expiry_str:
+        return None
     try:
-        with open("renewal_results.json", "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        logger.info("处理结果已保存到 renewal_results.json")
-    except Exception as e:
-        logger.error(f"保存结果错误: {e}")
+        # 尝试解析常见的时间格式
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+            try:
+                exp_dt = datetime.strptime(expiry_str.split(".")[0].rstrip("Z"), fmt.replace(".%fZ", "").replace("Z", ""))
+                remaining = (exp_dt - datetime.now()).days
+                return remaining
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+
+def process_account(api_key, index):
+    """处理单个账号下的域名检查与续期"""
+    logger.info(f"\n--- 开始处理第 {index} 个账号 ---")
+    domains = fetch_domains(api_key)
+    if not domains:
+        logger.info(f"账号 {index} 未找到任何域名或获取列表为空。")
+        return f"账号 {index}: 未找到域名或 Key 无效"
+
+    report_lines = [f"【账号 {index} 报告】"]
+    
+    for d in domains:
+        name = d.get("name") or d.get("domain")
+        if not name:
+            continue
+        
+        # 获取到期时间字段 (兼容不同字段名)
+        expiry_raw = d.get("expires_at") or d.get("expiry_date") or d.get("expire_at")
+        remaining_days = parse_expiry_days(expiry_raw)
+        
+        logger.info(f"检查域名: {name} (到期时间: {expiry_raw}, 剩余天数: {remaining_days})")
+
+        # 判断逻辑：如果能明确计算出剩余天数，且大于 120 天，则跳过（平台通常限制120天内可续期）
+        if remaining_days is not None and remaining_days > 120:
+            logger.info(f"ℹ️ 域名 {name} 距离到期还有 {remaining_days} 天，暂无需续期，已跳过。")
+            report_lines.append(-f"⚪ {name}: 剩 {remaining_days} 天 (未到期)")
+            continue
+
+        # 尝试发起续期请求
+        result = renew_domain(api_key, name)
+        if result["status"] in [200, 201]:
+            logger.info(f"✅ 域名 {name} 续期成功！")
+            report_lines.append(f"✅ {name}: 续期成功 (+1年)")
+        else:
+            msg = result["body"]
+            if "more than 120 days" in msg or "cannot renew" in msg.lower():
+                # 尝试从错误信息中提取或友好展示
+                logger.info(f"ℹ️ 域名 {name} 距离到期超过 120 天，暂时无法续期。")
+                report_lines.append(f"⚪ {name}: 距离到期超120天 (未到期)")
+            else:
+                logger.warning(f"❌ 域名 {name} 续期失败: {msg[:120]}바이")
+                report_lines.append(f"❌ {name}: 失败 ({msg[:60]})")
+
+    return "\n".join(report_lines)
 
 def main():
     validate_config()
     
-    domains = fetch_domains()
-    if not domains:
-        logger.info("未找到任何域名或获取列表为空。")
-        return
+    all_reports = []
+    for idx, key in enumerate(DP_API_KEYS, 1):
+        account_report = process_account(key, idx)
+        all_reports.append(account_report)
 
-    logger.info(f"共获取到 {len(domains)} 个域名，开始检查续期状态...")
-    renewed_domains = []
-    failed_domains = []
-
-    for d in domains:
-        # 兼容不同字段名称
-        name = d.get("name") or d.get("domain")
-        can_renew = d.get("can_manual_renew", True) # 默认若无此字段则尝试请求
-        
-        if not name:
-            continue
-
-        logger.info(f"正在检查域名: {name}")
-
-        # 发起续期请求
-        result = renew_domain(name)
-        if result["status"] in [200, 201]:
-            logger.info(f"✅ 域名 {name} 续期成功！")
-            renewed_domains.append(name)
-        else:
-            msg = result["body"]
-            # 常见提示：距到期时间超过 120 天暂时无法续期
-            if "more than 120 days" in msg or "cannot renew" in msg.lower():
-                logger.info(f"ℹ️ 域名 {name} 距离到期时间尚早，暂无需续期。")
-            else:
-                logger.warning(f"❌ 域名 {name} 续期失败: {msg[:150]}")
-                failed_domains.append(f"{name}: {msg[:100]}")
-
-    # 汇总通知内容
-    title = "DigitalPlat 自动续期报告"
-    content_lines = []
-    if renewed_domains:
-        content_lines.append(f"✅ 成功续期 ({len(renewed_domains)}):")
-        content_lines.extend([f"- {d}" for d in renewed_domains])
-    if failed_domains:
-        content_lines.append(f"\n❌ 失败或跳过 ({len(failed_domains)}):")
-        content_lines.extend([f"- {f}" for f in failed_domains])
-    
-    if not content_lines:
-        content_lines.append("所有域名检查完毕，本次无需要续期的域名。")
-
-    final_content = "\n".join(content_lines)
+    final_content = "\n\n".join(all_reports)
+    title = "DigitalPlat 自动续期汇总报告"
     
     # 发送通知
     send_notifications(title, final_content)
-    save_results(renewed_domains, failed_domains)
-    logger.info("所有任务执行完毕。")
+    logger.info("所有账号任务执行完毕。")
 
 if __name__ == "__main__":
     main()
