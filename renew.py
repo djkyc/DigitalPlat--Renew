@@ -1,4 +1,4 @@
-# renew.py - DigitalPlat 多账号纯 API 自动续期与邮箱标识版
+# renew.py - DigitalPlat 多账号纯 API 自动续期与精准邮箱标识版
 
 import os
 import sys
@@ -15,11 +15,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 1. 从环境变量中读取配置 ---
-# 支持多账号，多个 Key 用英文逗号隔开
 DP_API_KEYS_RAW = os.getenv("DP_API_KEY", "")
 DP_API_KEYS = [k.strip() for k in DP_API_KEYS_RAW.split(",") if k.strip()]
 
-# 账号邮箱映射，用英文逗号隔开，例如: adjlevis@qq.com, liu687836@gmail.com, djbadboy.vip@qq.com
 DP_ACCOUNT_EMAILS_RAW = os.getenv("DP_ACCOUNT_EMAILS", "")
 DP_ACCOUNT_EMAILS = [e.strip() for e in DP_ACCOUNT_EMAILS_RAW.split(",") if e.strip()]
 
@@ -38,12 +36,9 @@ def validate_config():
     if not DP_API_KEYS:
         logger.error("错误：缺少必需的环境变量 DP_API_KEY。请在 GitHub Secrets 中配置。")
         sys.exit(1)
-
-def get_account_label(index):
-    """根据索引获取账号标识名称（优先显示邮箱，若无则显示账号数字）"""
-    if index - 1 < len(DP_ACCOUNT_EMAILS) and DP_ACCOUNT_EMAILS[index - 1]:
-        return DP_ACCOUNT_EMAILS[index - 1]
-    return f"账号 {index}"
+    if not DP_ACCOUNT_EMAILS:
+        logger.error("错误：缺少必需的环境变量 DP_ACCOUNT_EMAILS。请配置对应的邮箱。")
+        sys.exit(1)
 
 def send_notifications(title, content):
     """同时推送通知到 Telegram 和 自定义微信"""
@@ -75,7 +70,7 @@ def send_notifications(title, content):
                 "token": WX_PUSH_TOKEN,
                 "title": title,
                 "text": content,
-                "summary": title + "\n" + content[:100],  # 确保微信列表预览直接显示内容
+                "summary": title + "\n" + content[:100],  
                 "description": content,
                 "content": content
             }
@@ -96,7 +91,7 @@ def get_headers(api_key):
     }
 
 def parse_expiry_days(expiry_str):
-    """解析到期时间字符串并计算剩余天数（支持纯数字 20270412 格式）"""
+    """解析到期时间字符串并计算剩余天数"""
     if not expiry_str:
         return None
     expiry_str = str(expiry_str).strip()
@@ -160,17 +155,17 @@ def renew_domain(api_key, domain_identifier):
             "body": str(e)
         }
 
-def process_account(api_key, index):
+def process_account(api_key, email, index):
     """处理单个账号下的域名检查与续期"""
-    account_name = get_account_label(index)
-    logger.info(f"\n--- 开始处理账号: {account_name} ---")
+    account_label = f"{index}. {email}"
+    logger.info(f"\n--- 开始处理账号: {account_label} ---")
     
     domains = fetch_domains(api_key)
     if not domains:
-        logger.info(f"账号 {account_name} 未找到任何域名或获取列表为空。")
-        return f"【账号: {account_name}】\n⚠️ 未找到有效域名或 API Key 无效"
+        logger.info(f"账号 {account_label} 未找到任何域名或获取列表为空。")
+        return f"【账号: {account_label}】\n⚠️ 未找到有效域名或 API Key 无效"
 
-    report_lines = [f"【账号: {account_name}】"]
+    report_lines = [f"【账号: {account_label}】"]
     
     for d in domains:
         name = d.get("name") or d.get("domain")
@@ -189,7 +184,7 @@ def process_account(api_key, index):
             report_lines.append(f"⚪ {name}: 剩 {remaining_days} 天 (未到期)")
             continue
 
-        # 处于 120 天内（或无法解析日期时），尝试进行续期
+        # 处于 120 天内，尝试进行续期
         result = renew_domain(api_key, domain_id)
         if result["status"] in [200, 201]:
             logger.info(f"✅ 域名 {name} 续期成功！")
@@ -210,8 +205,13 @@ def main():
     validate_config()
     
     all_reports = []
-    for idx, key in enumerate(DP_API_KEYS, 1):
-        account_report = process_account(key, idx)
+    # 以配置的邮箱列表为基准进行循环
+    for idx, email in enumerate(DP_ACCOUNT_EMAILS, 1):
+        # 智能匹配 API Key：如果 Key 数量和邮箱数量一致则按对应顺序取，如果只配置了 1 个 Key 则所有账号共用该 Key
+        key_index = idx - 1 if idx - 1 < len(DP_API_KEYS) else 0
+        current_api_key = DP_API_KEYS[key_index]
+        
+        account_report = process_account(current_api_key, email, idx)
         all_reports.append(account_report)
 
     final_content = "\n\n".join(all_reports)
