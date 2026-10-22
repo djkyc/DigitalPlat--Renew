@@ -23,6 +23,8 @@
 
 请在 GitHub 仓库的 **Settings** -> **Secrets and variables** -> **Actions** 中添加以下密钥：
 
+**DP_API_KEY 在账号下面的api密钥创建一下复出来就行了**
+
 | 变量名 | 是否必填 | 示例 / 说明 |
 | :--- | :---: | :--- |
 | `DP_API_KEY` | **是** | `dp_live_xxx1, dp_live_xxx2, dp_live_xxx3`<br>*(多个账号 Key 用英文逗号分隔)* |
