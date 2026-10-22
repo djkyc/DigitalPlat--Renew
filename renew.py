@@ -1,4 +1,4 @@
-# renew.py - DigitalPlat 多账号纯 API 自动续期与错误捕获推送版
+# renew.py - DigitalPlat 严格账号与 API 密钥对齐版
 
 import os
 import sys
@@ -32,8 +32,7 @@ WX_PUSH_TOKEN = os.getenv("WX_PUSH_TOKEN")
 API_BASE_URL = "https://domain-api.digitalplat.org/api/v1"
 
 def send_notifications(title, content):
-    """同时推送通知到 Telegram 和 自定义微信（带错误兜底）"""
-    # 1. 发送 Telegram 通知
+    """同时推送通知到 Telegram 和 自定义微信"""
     if TG_BOT_TOKEN and TG_CHAT_ID:
         try:
             tg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -50,7 +49,6 @@ def send_notifications(title, content):
         except Exception as e:
             logger.error(f"Telegram 通知异常: {e}")
 
-    # 2. 发送自定义微信 / wxsend 通知
     if WX_PUSH_URL and WX_PUSH_TOKEN:
         try:
             headers = {
@@ -149,6 +147,11 @@ def process_account(api_key, email, index):
     account_label = f"{index}. {email}"
     logger.info(f"\n--- 开始处理账号: {account_label} ---")
     
+    # 严格校验当前账号是否有对应的 API Key
+    if not api_key:
+        logger.warning(f"账号 {account_label} 未配置对应的 DP_API_KEY，已跳过。")
+        return f"【账号: {account_label}】\n⚠️ 未配置对应的 API 密钥 (DP_API_KEY)，跳过检查"
+
     domains, err = fetch_domains(api_key)
     if err:
         logger.error(f"账号 {account_label} 出错: {err}")
@@ -194,20 +197,18 @@ def process_account(api_key, email, index):
 
 def main():
     try:
-        # 基础校验：如果完全没配 API Key，直接抛出异常并通过微信/TG发送
         if not DP_API_KEYS:
             raise ValueError("缺少必需的环境变量 DP_API_KEY，请在 GitHub Secrets 中配置。")
         
-        # 如果没有配 DP_ACCOUNT_EMAILS，但配了 API_KEY，则自动生成默认账号名，不中断
         account_emails = DP_ACCOUNT_EMAILS
         if not account_emails:
             account_emails = [f"account_{i+1}@digitalplat.org" for i in range(len(DP_API_KEYS))]
 
         all_reports = []
         for idx, email in enumerate(account_emails, 1):
-            # 智能匹配：如果只配了 1 个 Key，所有邮箱共用该 Key；如果配了多个则依次对应
-            key_index = idx - 1 if idx - 1 < len(DP_API_KEYS) else 0
-            current_api_key = DP_API_KEYS[key_index]
+            # 严格按照索引匹配：第 1 个邮箱配第 1 个 Key，第 2 个邮箱配第 2 个 Key（如果没配则为 None）
+            key_index = idx - 1
+            current_api_key = DP_API_KEYS[key_index] if key_index < len(DP_API_KEYS) else None
             
             account_report = process_account(current_api_key, email, idx)
             all_reports.append(account_report)
@@ -215,14 +216,12 @@ def main():
         final_content = "\n\n".join(all_reports)
         title = "DigitalPlat 自动续期汇总报告"
         
-        # 正常发送推送
         send_notifications(title, final_content)
         logger.info("所有账号任务执行完毕。")
 
     except Exception as e:
         error_msg = f"脚本运行发生严重错误:\n{str(e)}"
         logger.error(error_msg)
-        # 即使报错崩溃，也通过 TG 和微信把错误原因发出来
         send_notifications("DigitalPlat 脚本运行报错告警", error_msg)
         sys.exit(1)
 
