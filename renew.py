@@ -214,7 +214,7 @@ def main():
             all_reports.append(account_report)
 
         final_content = "\n\n".join(all_reports)
-        title = "DigitalPlat 自动续期汇总报告"
+        title = "DigitalPlat Github:56959566 自动续期汇总报告"
         
         send_notifications(title, final_content)
         logger.info("所有账号任务执行完毕。")
