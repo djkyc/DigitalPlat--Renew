@@ -50,26 +50,24 @@ def send_notifications(title, content):
             logger.error(f"Telegram 通知异常: {e}")
 
     if WX_PUSH_URL and WX_PUSH_TOKEN:
-        try:
-            headers = {
-                "Authorization": f"Bearer {WX_PUSH_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "token": WX_PUSH_TOKEN,
-                "title": title,
-                "text": content,
-                "summary": title + "\n" + content[:100],  
-                "description": content,
-                "content": content
-            }
-            res = requests.post(WX_PUSH_URL, json=payload, headers=headers, timeout=10)
-            if res.status_code == 200:
-                logger.info("微信通知发送成功。")
-            else:
-                logger.warning(f"微信通知发送失败: {res.status_code} - {res.text}")
-        except Exception as e:
-            logger.error(f"微信通知异常: {e}")
+            try:
+                headers = {
+                    "Authorization": f"Bearer {WX_PUSH_TOKEN}", 
+                    "Content-Type": "application/json"
+                }
+                # 针对自建接口精简 payload，只传它需要用的字段
+                payload = {
+                    "token": WX_PUSH_TOKEN,
+                    "title": title,
+                    "content": content
+                }
+                res = requests.post(WX_PUSH_URL, json=payload, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    logger.info("微信通知发送成功。")
+                else:
+                    logger.warning(f"微信通知发送失败: {res.status_code} - {res.text}")
+            except Exception as e:
+                logger.error(f"微信通知异常: {e}")
 
 def get_headers(api_key):
     """构建官方 API 请求头"""
